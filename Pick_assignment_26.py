@@ -518,8 +518,8 @@ def main():
 
     xlsx_path = export_keeper_sheet(
     managers_df=managers_df,
-    keeper_rounds_csv="2025_Keeper_rounds.csv",
-    out_xlsx="2025_Keeper_Pick_Assignments.xlsx",
+    keeper_rounds_csv="2026_Keeper_rounds.csv",
+    out_xlsx="2026_Keeper_Pick_Assignments.xlsx",
     player_list=player_list  # optional; helps fill names not present in CSV
     )
     print("Wrote:", xlsx_path)

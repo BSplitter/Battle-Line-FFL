@@ -5,7 +5,7 @@ import math
 
 def main():
     #Inputs
-    current_year = 2025 #The current year is the one for which we are trying to find the keeper rounds for. The last played year is current_year-1.
+    current_year = 2026 #The current year is the one for which we are trying to find the keeper rounds for. The last played year is current_year-1.
     past_kr_csv = f'{current_year-1}_Keeper_Rounds.csv'
     manual_player_ids = {'Michael Carter': '7607', 
                          'C.J. Mosley': '1875',
@@ -20,7 +20,8 @@ def main():
     #name_disambiguation = {'4984': 'Josh Allen-QB', '5840': 'Josh Allen-LB'}
     name_disambiguation = {}
     #league_id = 1048428546022117376 #2024 League ID
-    league_id = 1180581794923024384 #2025 League ID
+    #league_id = 1180581794923024384 #2025 League ID
+    league_id = 1312084354846961664 #2026 League ID
     draft_id = league_id+1
     league = League(league_id) #League ID
     prev_league = League(int(league._league['previous_league_id']))
