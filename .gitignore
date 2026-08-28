@@ -1,4 +1,7 @@
 *.log
+.venv/
+__pycache__/
+*.py[cod]
 Sounds/
 Questionnaire answers.csv
 Player Value Analysis.xlsx
