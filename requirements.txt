@@ -1,0 +1,5 @@
+pandas>=2.3,<4
+requests>=2.32,<3
+sleeper-wrapper>=1.1,<2
+more-itertools>=10,<11
+xlsxwriter>=3.2,<4

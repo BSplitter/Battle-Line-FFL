@@ -7,6 +7,22 @@ import pandas as pd
 import requests
 import math
 
+
+def get_draft_for_season(league, season):
+    """Return this league's draft for exactly ``season``."""
+    season = str(season)
+    drafts = league.get_all_drafts() or []
+    matches = [draft for draft in drafts if str(draft.get("season")) == season]
+    if not matches:
+        available = sorted({str(draft.get("season")) for draft in drafts})
+        raise ValueError(
+            f"No Sleeper draft found for {season}. Available seasons: "
+            f"{', '.join(available) if available else 'none'}"
+        )
+
+    # Sleeper can retain copied/mock draft records. Prefer the newest exact match.
+    return max(matches, key=lambda draft: int(draft.get("created") or 0))
+
 def check_pick_integrity(picks, managers, num_rounds):
     """Checks whether the picks assigned to each manager make sense"""
     all_picks = []
@@ -23,37 +39,51 @@ def check_pick_integrity(picks, managers, num_rounds):
 def original_draft_picks(draft_pos, managers, num_rounds):
     """Determines what the original draft picks for each player should be"""
     orig_picks = {}
+    league_size = len(draft_pos)
+    if league_size <= 0:
+        raise ValueError("draft_pos cannot be empty")
     for idx, manager in enumerate(draft_pos):
         if manager != managers[idx]: raise RuntimeError(f"manager name {manager} is not the same as listed in draft_pos")
     for manager in draft_pos:
         orig_picks[manager] = [draft_pos[manager]]
         for round in range(2,num_rounds+1):
             if round <= 6: 
-                orig_picks[manager].append(10*(round-1) + draft_pos[manager])
+                orig_picks[manager].append(league_size*(round-1) + draft_pos[manager])
             elif round > 6 and round % 2 == 0: #Even round
-                orig_picks[manager].append(10*(round-1) + draft_pos[manager])
+                orig_picks[manager].append(league_size*(round-1) + draft_pos[manager])
             elif round > 6 and round % 2 == 1: #Odd round
-                orig_picks[manager].append(10*(round) + 1 - draft_pos[manager])
+                orig_picks[manager].append(league_size*round + 1 - draft_pos[manager])
     return orig_picks
 
 def sleeper_current_picks(league_id, season=None):
     base = "https://api.sleeper.app/v1"
 
-    drafts = requests.get(f"{base}/league/{league_id}/drafts").json() or []
+    def get_json(url):
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    drafts = get_json(f"{base}/league/{league_id}/drafts") or []
     if not drafts: return {}
 
     if season is None:
         dmeta = max(drafts, key=lambda d: int(d["season"]))
     else:
         season = str(season)
-        dmeta = next((d for d in drafts if str(d["season"]) == season),
-                     max(drafts, key=lambda d: int(d["season"])))
+        matches = [d for d in drafts if str(d.get("season")) == season]
+        if not matches:
+            available = sorted({str(d.get("season")) for d in drafts})
+            raise ValueError(
+                f"No Sleeper draft found for {season}. Available seasons: "
+                f"{', '.join(available) if available else 'none'}"
+            )
+        dmeta = max(matches, key=lambda d: int(d.get("created") or 0))
     draft_id   = dmeta["draft_id"]
     season_str = str(dmeta["season"])
 
-    draft   = requests.get(f"{base}/draft/{draft_id}").json()
-    rosters = requests.get(f"{base}/league/{league_id}/rosters").json()
-    trades  = requests.get(f"{base}/league/{league_id}/traded_picks").json() or []
+    draft   = get_json(f"{base}/draft/{draft_id}")
+    rosters = get_json(f"{base}/league/{league_id}/rosters")
+    trades  = get_json(f"{base}/league/{league_id}/traded_picks") or []
 
     # slot (draft position) -> origin roster_id
     slot_to_roster = {int(k): int(v) for k, v in draft.get("slot_to_roster_id", {}).items()}
@@ -115,10 +145,17 @@ def sleeper_current_picks(league_id, season=None):
 #             if len(set(ek_ids)-set(dk_ids)) == 5: raise ValueError("Manager {} kept too many early-round keepers".format(manager))
 #         if len(keepers[manager]) == 6 and len(dk_ids) == 0: raise ValueError("Manager {} kept 6 offensive players. One must be on defense.".format(manager))
 
-def check_keeper_integrity_df(managers_df, rosters, player_list, early_round_threshold=10, max_keepers=6):
+def check_keeper_integrity_df(
+    managers_df,
+    rosters,
+    player_list,
+    rounds_col="Keeper_rounds_2025",
+    early_round_threshold=10,
+    max_keepers=6,
+):
     """
     Validate keeper selections per league rules using managers_df rows.
-      - managers_df must have: User_id, display_name, Keepers (list[str]), Keeper_rounds_2025 (list[Int/None])
+      - managers_df must have: User_id, display_name, Keepers (list[str]), and rounds_col (list[Int/None])
       - rosters: Sleeper /league/{league_id}/rosters result (list[dict])
       - player_list: Sleeper players dict keyed by Sleeper ID (as strings) -> {'position': ...}
     Raises ValueError/RuntimeError on violations; returns True if all good.
@@ -142,7 +179,8 @@ def check_keeper_integrity_df(managers_df, rosters, player_list, early_round_thr
         user_id   = str(row.User_id)
         mname     = str(row.display_name)
         keepers   = row.Keepers if isinstance(row.Keepers, list) else []
-        k_rounds  = row.Keeper_rounds_2025 if isinstance(row.Keeper_rounds_2025, list) else []
+        row_rounds = getattr(row, rounds_col, None)
+        k_rounds = row_rounds if isinstance(row_rounds, list) else []
 
         # Basic checks
         if len(keepers) > max_keepers:
@@ -287,7 +325,11 @@ def export_keeper_sheet(
     out_xlsx="Keeper_Assignments_2025.xlsx",
     player_list=None,
     league_size=None,   # optional; if None we'll infer from Draft_order
+    keeper_year=2025,
+    rounds_col=None,
 ):
+    rounds_col = rounds_col or f"Keeper_rounds_{keeper_year}"
+    csv_rounds_col = f"{keeper_year} keeper round"
     # --- helper: overall -> "round.pick" (no zero-padding) ---
     def to_round_pick(p, L):
         if p is None or pd.isna(p): 
@@ -309,11 +351,18 @@ def export_keeper_sheet(
     k = pd.read_csv(keeper_rounds_csv, dtype={"Sleeper ID": "string"}).rename(
         columns={"Sleeper ID": "Sleeper_ID",
                  "Player Name": "Player_name",
-                 "2025 keeper round": "Keeper_round_2025"}
+                 csv_rounds_col: "Keeper_round"}
     )
+    required_columns = {"Sleeper_ID", "Player_name", "Keeper_round"}
+    missing_columns = required_columns - set(k.columns)
+    if missing_columns:
+        raise ValueError(
+            f"{keeper_rounds_csv} is missing required column(s): "
+            f"{', '.join(sorted(missing_columns))}"
+        )
     k["Sleeper_ID"] = k["Sleeper_ID"].str.strip()
     name_map  = dict(zip(k["Sleeper_ID"], k["Player_name"]))
-    round_map = dict(zip(k["Sleeper_ID"], pd.to_numeric(k["Keeper_round_2025"], errors="coerce")))
+    round_map = dict(zip(k["Sleeper_ID"], pd.to_numeric(k["Keeper_round"], errors="coerce")))
 
     def get_name(pid):
         pid = str(pid)
@@ -330,7 +379,8 @@ def export_keeper_sheet(
     for row in df.itertuples(index=False):
         mname   = row.display_name
         keepers = list(row.Keepers) if isinstance(row.Keepers, list) else []
-        krounds = list(getattr(row, "Keeper_rounds_2025", [])) if isinstance(getattr(row, "Keeper_rounds_2025", []), list) else [None]*len(keepers)
+        row_rounds = getattr(row, rounds_col, None)
+        krounds = list(row_rounds) if isinstance(row_rounds, list) else [None]*len(keepers)
 
         # Prefer precomputed assignments (list of (id, pick))
         assignments = getattr(row, "Keeper_assignments", None)
@@ -392,12 +442,13 @@ def main():
     league_id    = 1312084354846961664
     current_year = 2026
     name_disambiguation = {}
-    ### IN 2025_keeper_rounds.csv, the code expects a column named "2025 keeper round". In 2025, this was placed manually
+    rounds_col = f"Keeper_rounds_{current_year}"
+    csv_rounds_col = f"{current_year} keeper round"
 
     league        = League(league_id)
     managers_list = league.get_users()      # list[dict]
     rosters       = league.get_rosters()    # list[dict]
-    draft         = league.get_specific_draft()  # dict
+    draft         = get_draft_for_season(league, current_year)
     players       = Players()
     d             = players.get_all_players()
     player_list   = {k: d[k] for k in sorted(
@@ -475,15 +526,23 @@ def main():
         .rename(columns={
             "Sleeper ID": "Sleeper_ID",
             "Player Name": "Player_name",
-            "2025 keeper round": "Keeper_round_2025",
+            csv_rounds_col: "Keeper_round",
         }))
+
+    required_columns = {"Sleeper_ID", "Player_name", "Keeper_round"}
+    missing_columns = required_columns - set(k.columns)
+    if missing_columns:
+        raise ValueError(
+            f"{kr_doc} is missing required column(s): "
+            f"{', '.join(sorted(missing_columns))}"
+        )
 
     # Clean types
     k["Sleeper_ID"]        = k["Sleeper_ID"].str.strip()
-    k["Keeper_round_2025"] = pd.to_numeric(k["Keeper_round_2025"], errors="coerce").astype("Int64")
+    k["Keeper_round_numeric"] = pd.to_numeric(k["Keeper_round"], errors="coerce").astype("Int64")
 
     # Build lookups
-    round_map = dict(zip(k["Sleeper_ID"], k["Keeper_round_2025"]))
+    round_map = dict(zip(k["Sleeper_ID"], k["Keeper_round_numeric"]))
     name_map  = dict(zip(k["Sleeper_ID"], k["Player_name"]))
 
     # --- Ensure Keepers are strings, then map rounds -----------------------------
@@ -491,13 +550,33 @@ def main():
     managers_df["Keepers"] = managers_df["Keepers"].apply(lambda lst: [str(x).strip() for x in lst])
 
     # List of rounds aligned with the Keepers list
-    managers_df["Keeper_rounds_2025"] = managers_df["Keepers"].apply(
+    managers_df[rounds_col] = managers_df["Keepers"].apply(
         lambda ids: [round_map.get(pid) for pid in ids]
     )
 
+    selected_keeper_ids = {
+        pid for keepers in managers_df["Keepers"] for pid in keepers
+    }
+    unresolved = k[
+        k["Sleeper_ID"].isin(selected_keeper_ids)
+        & k["Keeper_round_numeric"].isna()
+    ]
+    missing_keeper_ids = sorted(selected_keeper_ids - set(k["Sleeper_ID"].dropna()))
+    if not unresolved.empty or missing_keeper_ids:
+        details = [
+            f"{row.Player_name} ({row.Sleeper_ID}): {row.Keeper_round!r}"
+            for row in unresolved.itertuples(index=False)
+        ]
+        details.extend(f"Sleeper ID {pid}: missing from CSV" for pid in missing_keeper_ids)
+        raise ValueError(
+            f"Every selected keeper needs a numeric value in '{csv_rounds_col}'. "
+            "Replace ADP placeholders before assigning picks:\n  - "
+            + "\n  - ".join(details)
+        )
+
     # (nice to have) zipped tuples (player_id, round) and names, if you want them:
     managers_df["Keepers_with_rounds"] = managers_df.apply(
-        lambda r: list(zip(r["Keepers"], r["Keeper_rounds_2025"])), axis=1
+        lambda r: list(zip(r["Keepers"], r[rounds_col])), axis=1
     )
     managers_df["Keeper_names"] = managers_df["Keepers"].apply(lambda ids: [name_map.get(pid) for pid in ids])
 
@@ -505,13 +584,14 @@ def main():
     managers_df=managers_df,
     rosters=rosters,
     player_list=player_list,            # Sleeper players dict keyed by string IDs
+    rounds_col=rounds_col,
     early_round_threshold=10,           # early = round < 10
     max_keepers=6
     )
     print("Keeper integrity check passed:", ok)
 
     # Build assignments dict keyed by display_name
-    keeper_assignments = assign_keepers_from_df(managers_df)
+    keeper_assignments = assign_keepers_from_df(managers_df, rounds_col=rounds_col)
 
     # Add as a column
     managers_df["Keeper_assignments"] = managers_df["display_name"].map(keeper_assignments)
@@ -520,7 +600,9 @@ def main():
     managers_df=managers_df,
     keeper_rounds_csv="2026_Keeper_rounds.csv",
     out_xlsx="2026_Keeper_Pick_Assignments.xlsx",
-    player_list=player_list  # optional; helps fill names not present in CSV
+    player_list=player_list,  # optional; helps fill names not present in CSV
+    keeper_year=current_year,
+    rounds_col=rounds_col,
     )
     print("Wrote:", xlsx_path)
 
